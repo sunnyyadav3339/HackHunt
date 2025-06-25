@@ -2,12 +2,10 @@ from langchain_community.document_loaders import CSVLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain.prompts import PromptTemplate
+from langchain_ollama import ChatOllama
+from langchain_core.runnables import RunnableParallel, RunnablePassthrough
+from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
-from langchain_core.runnables import RunnableParallel, RunnableLambda, RunnablePassthrough
-from langchain_community.llms import HuggingFaceEndpoint
-
 
 # loading the hackathon data 
 loader = CSVLoader(
@@ -39,8 +37,45 @@ vectorstore.save_local("hackathon_faiss_index")
 # retrieving the relevant docs 
 vectorstore = FAISS.load_local("hackathon_faiss_index", embedding_model, allow_dangerous_deserialization=True)
 
-
 retriever = vectorstore.as_retriever(search_kwargs={"k": 5})  
 
 
+# Generating the response
+llm = ChatOllama(model="llama3.2")
+
+def format_docs(docs):
+    return "\n\n".join(doc.page_content for doc in docs)
+
+prompt = PromptTemplate.from_template("""
+Answer the following question based on the context below.
+If the answer cannot be found in the context, answer based on your knowledge.
+
+Context:
+{context}
+
+Question:
+{question}
+""")
+
+parallel_chain = RunnableParallel({
+    "context": retriever | format_docs,
+    "question": RunnablePassthrough()
+})
+
+main_chain = parallel_chain | prompt | llm | StrOutputParser()
+
+
+print("🤖 Ask me anything about upcoming hackathons! (type 'exit' to quit)\n")
+
+while True:
+    user_query = input("🟢 You: ")
+    if user_query.lower() in ["exit", "quit"]:
+        print("👋 Chat ended.")
+        break
+
+    try:
+        response = main_chain.invoke(user_query)
+        print(f"🤖 Bot: {response}\n")
+    except Exception as e:
+        print(f"⚠️ Error: {e}\n")
 
