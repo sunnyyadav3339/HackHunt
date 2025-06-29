@@ -1,4 +1,4 @@
-import requests, re, time, asyncio, json, os
+import requests, re, time, asyncio, json, os,aiohttp
 from bs4 import BeautifulSoup
 from datetime import datetime
 from pymongo import MongoClient
@@ -81,6 +81,7 @@ def scrape_devfolio():
     })
     return events    
 
+# Unstop Scraper
 async def scrape_unstop_link():
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=False)
@@ -226,7 +227,169 @@ async def scrape_unstop():
             await asyncio.sleep(2)
     return events
 
-client = MongoClient(os.getenv('DATABASE_URL'))
+# Hackerearth scraper
+async def scrape_challenge_links(url, status):
+    
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    }
+    
+    # Initialize the target data structure
+    challenge_info = {
+            'name': '',
+            'link':url,
+            'mode':'',
+            'status':status,
+            'prize_money': '',
+            'deadline': '',
+            'start_date': '',
+            'end_date': '',
+            'registration_fee': '',
+            'source':"Hackerearth"
+        }
+        
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=15) as response:
+                content = await response.read()
+                soup = BeautifulSoup(content, 'html.parser')
+        
+                # Extract Title
+                title_selectors = [
+                    'h1.challenge-title',
+                    'h1.header-title',
+                    '.challenge-header h1',
+                    'h1',
+                    'title'
+                ]
+                
+                for selector in title_selectors:
+                    title_elem = soup.select_one(selector)
+                    if title_elem:
+                        challenge_info['name'] = title_elem.get_text().strip()
+                        break
+                
+                mode = soup.find('div',class_ ='regular bold desc dark')
+                if mode:
+                    challenge_info['mode']=mode.get_text().strip()
+                # Extract Prize Money
+                prize_patterns = [
+                    r'\$[\d,]+',
+                    r'₹[\d,]+',
+                    r'Prize.*?\$[\d,]+',
+                    r'Cash.*?\$[\d,]+',
+                    r'Worth.*?\$[\d,]+'
+                ]
+                
+                page_text = soup.get_text()
+                for pattern in prize_patterns:
+                    prize_match = re.search(pattern, page_text, re.IGNORECASE)
+                    if prize_match:
+                        challenge_info['prize_money'] = prize_match.group().strip()
+                        break
+                
+                # Look for prize information in specific elements
+                prize_elements = soup.find_all(['div', 'span', 'p'], 
+                                            text=re.compile(r'prize|reward|cash', re.IGNORECASE))
+                for elem in prize_elements:
+                    text = elem.get_text()
+                    prize_match = re.search(r'\$[\d,]+|₹[\d,]+', text)
+                    if prize_match and not challenge_info['prize_money']:
+                        challenge_info['prize_money'] = prize_match.group()
+                        break
+                
+                # Extract Dates (Start, End, Deadline)
+                date_patterns = [
+                    r'(\d{1,2}[/-]\d{1,2}[/-]\d{4})',
+                    r'(\d{4}[/-]\d{1,2}[/-]\d{1,2})',
+                    r'(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4})',
+                    r'((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},?\s+\d{4})'
+                ]
+                
+                # Look for date containers
+                date_containers = soup.find_all(['div', 'span', 'p'], 
+                                            class_=re.compile(r'date|time|deadline|start|end', re.IGNORECASE))
+                
+                dates_found = []
+                for container in date_containers:
+                    text = container.get_text()
+                    for pattern in date_patterns:
+                        matches = re.findall(pattern, text, re.IGNORECASE)
+                        dates_found.extend(matches)
+                
+                # Also search in the entire page text
+                for pattern in date_patterns:
+                    matches = re.findall(pattern, page_text, re.IGNORECASE)
+                    dates_found.extend(matches)
+                
+                # Remove duplicates and assign dates
+                unique_dates = list(set(dates_found))
+                if len(unique_dates) >= 2:
+                    challenge_info['start_date'] = unique_dates[0]
+                    challenge_info['end_date'] = unique_dates[1]
+                    challenge_info['deadline'] = unique_dates[-1] 
+                elif len(unique_dates) == 1:
+                    challenge_info['deadline'] = unique_dates[0]
+                
+                
+                # Extract Registration Fee
+                fee_patterns = [
+                    r'registration.*?free',
+                    r'free.*?registration',
+                    r'no.*?fee',
+                    r'fee.*?\$[\d,]+',
+                    r'cost.*?\$[\d,]+',
+                    r'₹[\d,]+.*?registration'
+                ]
+                
+                for pattern in fee_patterns:
+                    fee_match = re.search(pattern, page_text, re.IGNORECASE)
+                    if fee_match:
+                        challenge_info['registration_fee'] = fee_match.group().strip()
+                        break
+                
+                # If no specific fee found, assume free (common for hackathons)
+                if not challenge_info['registration_fee']:
+                    if re.search(r'free|no cost|no fee', page_text, re.IGNORECASE):
+                        challenge_info['registration_fee'] = 'Free'
+                
+                return challenge_info
+
+    except Exception as e:
+        print(f"Error: {e}")
+        return None
+
+async def scrape_hackerearth():    
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)  # Set to True for headless mode
+        page = await browser.new_page()
+        events = []
+        
+        try:
+            await page.goto("https://www.hackerearth.com/challenges/?filters=hackathon")
+            await page.wait_for_load_state("networkidle")
+
+            html_content = await page.content()
+            doc = BeautifulSoup(html_content, 'html.parser')
+            
+            # Find all challenge card links, not just one
+            ong_chal = doc.find(class_='ongoing challenge-list').find_all('a', class_='challenge-card-wrapper challenge-card-link')
+            link_on = []
+            for link in ong_chal:
+                href = link.get('href')
+                link_on.append(scrape_challenge_links(href, 'Ongoing'))
+
+            events= await asyncio.gather(*link_on)
+
+        except Exception as e:
+            print(e)
+
+        finally:
+            await browser.close()
+            
+        return events
+
+client = MongoClient(os.getenv('MONGO_DB_URL'))
 db = client["hackathon_db"]
 col = db["events"]
 
@@ -234,11 +397,11 @@ def store_events(events):
     for event in events:
         col.update_one({"name": event["name"]}, { '$set' :event}, upsert=True)
         
-async def main():
+async def scrape():
     d1 = scrape_devfolio()
-    d2= await scrape_unstop()
-    store_events(d1+d2)
-    print(d2)
+    d2 = await scrape_unstop()
+    d3 = await scrape_hackerearth()
+    store_events(d1+d2+d3)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(scrape())
