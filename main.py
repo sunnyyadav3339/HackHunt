@@ -1,3 +1,6 @@
+#This files contains the code with basic chatbot without the ui
+
+
 from langchain_community.document_loaders import CSVLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
